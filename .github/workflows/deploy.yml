@@ -24,6 +24,8 @@ jobs:
 
       - name: Create .env for production
         run: |
+          set -euo pipefail
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Preparing production environment file (values are not logged)."
           cat > .env << ENVFILE
           NODE_ENV=production
           HOST=127.0.0.1
@@ -39,16 +41,24 @@ jobs:
           node-version: "20"
           cache: "npm"
 
-      - name: Install dependencies and build
+      - name: Install dependencies
         run: |
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Installing dependencies with npm ci."
           npm ci
+
+      - name: Build production site
+        run: |
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Building production site."
           npm run build
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Build complete."
 
       - name: Package release artifact
         run: |
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Packaging build output and server files."
           rm -rf .deploy-artifact
           mkdir -p .deploy-artifact
           cp -r dist server package.json package-lock.json .deploy-artifact/
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Release artifact ready."
 
       - name: Ensure deploy directory on VPS
         uses: appleboy/ssh-action@v1.2.5
@@ -59,8 +69,11 @@ jobs:
           timeout: 2m
           command_timeout: 5m
           script: |
+            set -e
+            echo "[deploy] Preparing ${{ env.DEPLOY_DIR }}"
             sudo -n mkdir -p "${{ env.DEPLOY_DIR }}"
             sudo -n chown -R "$USER:$USER" "${{ env.DEPLOY_DIR }}"
+            echo "[deploy] Deploy directory ready"
 
       - name: Deploy application files
         uses: appleboy/scp-action@master
@@ -93,7 +106,9 @@ jobs:
           script: |
             set -e
             cd "${{ env.DEPLOY_DIR }}"
+            echo "[deploy] Installing production dependencies in $(pwd)"
             npm ci --omit=dev
+            echo "[deploy] Production dependencies installed"
 
       - name: Deploy systemd unit
         uses: appleboy/scp-action@master
@@ -115,6 +130,7 @@ jobs:
           script: |
             set -e
             PORT="${{ env.APP_PORT }}"
+            echo "[deploy] Installing systemd unit and restarting clia on port ${PORT}"
             sudo systemctl stop clia || true
             if command -v fuser >/dev/null 2>&1; then
               sudo fuser -k "${PORT}/tcp" || true
@@ -134,6 +150,7 @@ jobs:
               sudo journalctl -u clia -n 120 --no-pager || true
               exit 1
             fi
+            echo "[deploy] clia service is active"
 
       - name: Clean Apache temp dir
         uses: appleboy/ssh-action@v1.2.5
@@ -164,6 +181,7 @@ jobs:
             set -e
             DOMAIN="${{ env.DOMAIN }}"
             STAGING="${{ env.APACHE_STAGING_DIR }}"
+            echo "[deploy] Applying Apache configuration for ${DOMAIN}"
             BACKUP_DIR="/etc/apache2/sites-available/backup-clia-$(date +%Y%m%d-%H%M%S)"
             sudo mkdir -p "$BACKUP_DIR"
             for f in "${DOMAIN}.conf" "${DOMAIN}-le-ssl.conf"; do
@@ -178,8 +196,10 @@ jobs:
             sudo a2ensite "${DOMAIN}.conf"
             sudo a2ensite "${DOMAIN}-le-ssl.conf"
             sudo a2enmod ssl rewrite proxy proxy_http headers 2>/dev/null || true
+            set +e
             CONFIG_TEST_OUTPUT=$(sudo apache2ctl configtest 2>&1)
             CONFIG_TEST_EXIT=$?
+            set -e
             echo "$CONFIG_TEST_OUTPUT"
             if [ $CONFIG_TEST_EXIT -ne 0 ]; then
               echo "Apache config test failed, restoring backups if any..."
@@ -188,12 +208,14 @@ jobs:
               done
               exit 1
             fi
+            echo "[deploy] Apache configuration test passed"
             if sudo systemctl is-active --quiet apache2; then
               sudo systemctl reload apache2
             else
               sudo systemctl start apache2
             fi
             rm -rf "$STAGING"
+            echo "[deploy] Apache configuration applied"
 
       - name: Verify HTTP response
         uses: appleboy/ssh-action@v1.2.5
@@ -204,6 +226,7 @@ jobs:
           script: |
             set -e
             PORT="${{ env.APP_PORT }}"
+            echo "[deploy] Checking local HTTP response on port ${PORT}"
             for i in 1 2 3 4 5 6 7 8 9 10; do
               if curl -sf -o /dev/null "http://127.0.0.1:${PORT}/"; then
                 echo "OK: CLIA static server responds on :${PORT}"
@@ -211,6 +234,6 @@ jobs:
               fi
               sleep 2
             done
-            echo "Health check failed"
+            echo "[deploy] ERROR: health check failed after 20 seconds"
             sudo journalctl -u clia -n 80 --no-pager || true
             exit 1
